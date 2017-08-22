@@ -20,6 +20,11 @@ var ssmParams = {
 
 // get the region where this lambda is running
 var region = process.env.AWS_DEFAULT_REGION;
+
+// get the github webhook secret parameter name
+var ssmToken = process.env.SSM_GITHUB_WEBHOOK_SECRET;
+
+// get the github repo
 var repo = process.env.GITHUB_REPOSITORY.split('/');
 
 
@@ -32,42 +37,53 @@ module.exports.resource = (event, context, callback) => {
       sendResponse(event, context, "SUCCESS");
       return;
   } else {
-    var data = {
-      owner: repo[3],
-      repo: repo[4],
-      name: 'web',
-      events: ['pull_request', 'issue_comment'],
-      active: true,
-      config: {
-        url: event.ResourceProperties.Endpoint,
-        content_type:"json"
-      }
-    };
-
-    setGithubAuth(github, ssm, ssmParams, function (err) {
+    ssm.getParameter({
+      Name: ssmToken,
+      WithDecryption: true
+    }, function (err, token) {
       if (err) {
-        console.log(err);
-        sendResponse(event, context, "FAILED", {});
-        callback(err);
-      } else {
-        if(event.RequestType == "Create") {
-          github.repos.createHook(data).then(function(data){
-            sendResponse(event, context, "SUCCESS", {});
-          }).catch(function(err){
-            console.log(err);
-            sendResponse(event, context, "FAILED", {});
-            callback(err);
-          });
-        } else {
-          github.repos.editHook(data).then(function(data){
-            sendResponse(event, context, "SUCCESS", {});
-          }).catch(function(err){
-            console.log(err);
-            sendResponse(event, context, "FAILED", {});
-            callback(err);
-          });
-        }
+        sendResponse(event, context, "FAILED");
+        return callback(err);
       }
+
+      var data = {
+        owner: repo[3],
+        repo: repo[4],
+        name: 'web',
+        events: ['pull_request', 'issue_comment'],
+        active: true,
+        config: {
+          url: event.ResourceProperties.Endpoint,
+          content_type:"json",
+          secret: token.Parameter.Value
+        }
+      };
+
+      setGithubAuth(github, ssm, ssmParams, function (err) {
+        if (err) {
+          console.log(err);
+          sendResponse(event, context, "FAILED", {});
+          callback(err);
+        } else {
+          if(event.RequestType == "Create") {
+            github.repos.createHook(data).then(function(data){
+              sendResponse(event, context, "SUCCESS", {});
+            }).catch(function(err){
+              console.log(err);
+              sendResponse(event, context, "FAILED", {});
+              callback(err);
+            });
+          } else {
+            github.repos.editHook(data).then(function(data){
+              sendResponse(event, context, "SUCCESS", {});
+            }).catch(function(err){
+              console.log(err);
+              sendResponse(event, context, "FAILED", {});
+              callback(err);
+            });
+          }
+        }
+      });
     });
   }
   // var responseStatus = "FAILED";

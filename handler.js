@@ -2,6 +2,7 @@
 
 var AWS = require('aws-sdk');
 var codebuild = new AWS.CodeBuild();
+var crypto = require('crypto');
 var ssm = new AWS.SSM();
 
 var GitHubApi = require("github");
@@ -29,6 +30,9 @@ var ssmParams = {
 // get the region where this lambda is running
 var region = process.env.AWS_DEFAULT_REGION;
 
+// get the github webhook secret parameter name
+var ssmToken = process.env.SSM_GITHUB_WEBHOOK_SECRET;
+
 // get the github status context
 var githubContext = process.env.GITHUB_STATUS_CONTEXT;
 
@@ -45,88 +49,96 @@ buildComment = buildComment != "" ? buildComment : "go codebuild go";
 
 // this function will be triggered by the github webhook
 module.exports.start_build = (event, context, callback) => {
+  console.log("REQUEST RECEIVED:\n" + JSON.stringify(event));
 
-  var response = {
-    pull_request: {},
-    build: {}
-  };
-
-  var buildOptions = {
-    event: event,
-    buildEvents: buildEvents,
-    buildUsers: buildUsers,
-    buildComment: buildComment,
-    pullActions: PULL_ACTIONS,
-    commentActions: COMMENT_ACTIONS
-  };
-
-  getPullRequest(buildOptions, function (err, pullRequest) {
+  verifyGithubEvent(event, ssmToken, function (err) {
     if (err) {
       console.log(err);
-      callback(err);
-    } else if (pullRequest.state != "open") {
-      callback("Pull request is not open");
-    } else {
-      console.log("Cleared tests, this is a buildable event:", event)
-      response.pull_request = pullRequest;
-      var head = pullRequest.head;
-      var base = pullRequest.base;
-      var repo = base.repo;
-
-      var params = {
-        projectName: process.env.BUILD_PROJECT,
-        sourceVersion: 'pr/' + pullRequest.number
-      };
-
-      var status = {
-        owner: repo.owner.login,
-        repo: repo.name,
-        sha: head.sha,
-        state: 'pending',
-        context: githubContext,
-        description: 'Setting up the build...'
-      };
-
-      setGithubAuth(github, ssm, ssmParams, function (err) {
-        if (err) {
-          console.log(err);
-          callback(err);
-        } else {
-          // check that we can set a status before starting the build
-          github.repos.createStatus(status).then(function(data) {
-            console.log("Set setup status:", data)
-            // start the codebuild  project
-            codebuild.startBuild(params, function(err, data) {
-              if (err) {
-                console.log(err, err.stack);
-                callback(err);
-              } else {
-                // store the build data in the response
-                response.build = data.build;
-                console.log("Started CodeBuild job:", data)
-
-                // all is well, mark the commit as being 'in progress'
-                status.description = 'Build is running...'
-                status.target_url = 'https://' + region + '.console.aws.amazon.com/codebuild/home?region=' + region + '#/builds/' + data.build.id + '/view/new'
-                github.repos.createStatus(status).then(function(data){
-                  // success
-                  console.log("Set running status:", data)
-                  callback(null, response);
-                }).catch(function(err) {
-                  console.log(err);
-                  callback(err);
-                });
-              }
-            });
-          }).catch(function(err) {
-            console.log("Github authentication failed");
-            console.log(err, err.stack);
-            callback(err);
-          });
-        }
-      });
+      return callback(err);
     }
-  });
+
+    var response = {
+      pull_request: {},
+      build: {}
+    };
+
+    var buildOptions = {
+      event: event,
+      buildEvents: buildEvents,
+      buildUsers: buildUsers,
+      buildComment: buildComment,
+      pullActions: PULL_ACTIONS,
+      commentActions: COMMENT_ACTIONS
+    };
+
+    getPullRequest(buildOptions, function (err, pullRequest) {
+      if (err) {
+        console.log(err);
+        callback(err);
+      } else if (pullRequest.state != "open") {
+        callback("Pull request is not open");
+      } else {
+        console.log("Cleared tests, this is a buildable event:", event)
+        response.pull_request = pullRequest;
+        var head = pullRequest.head;
+        var base = pullRequest.base;
+        var repo = base.repo;
+
+        var params = {
+          projectName: process.env.BUILD_PROJECT,
+          sourceVersion: 'pr/' + pullRequest.number
+        };
+
+        var status = {
+          owner: repo.owner.login,
+          repo: repo.name,
+          sha: head.sha,
+          state: 'pending',
+          context: githubContext,
+          description: 'Setting up the build...'
+        };
+
+        setGithubAuth(github, ssm, ssmParams, function (err) {
+          if (err) {
+            console.log(err);
+            callback(err);
+          } else {
+            // check that we can set a status before starting the build
+            github.repos.createStatus(status).then(function(data) {
+              console.log("Set setup status:", data)
+              // start the codebuild  project
+              codebuild.startBuild(params, function(err, data) {
+                if (err) {
+                  console.log(err, err.stack);
+                  callback(err);
+                } else {
+                  // store the build data in the response
+                  response.build = data.build;
+                  console.log("Started CodeBuild job:", data)
+
+                  // all is well, mark the commit as being 'in progress'
+                  status.description = 'Build is running...'
+                  status.target_url = 'https://' + region + '.console.aws.amazon.com/codebuild/home?region=' + region + '#/builds/' + data.build.id + '/view/new'
+                  github.repos.createStatus(status).then(function(data){
+                    // success
+                    console.log("Set running status:", data)
+                    callback(null, response);
+                  }).catch(function(err) {
+                    console.log(err);
+                    callback(err);
+                  });
+                }
+              });
+            }).catch(function(err) {
+              console.log("Github authentication failed");
+              console.log(err, err.stack);
+              callback(err);
+            });
+          }
+        });
+      }
+    });
+});
 }
 
 module.exports.check_build_status = (event, context, callback) => {
@@ -191,6 +203,52 @@ module.exports.build_done = (event, context, callback) => {
         context.fail(data);
       });
     }
+  });
+}
+
+function signRequestBody(key, body) {
+  return `sha1=${crypto.createHmac('sha1', key).update(body, 'utf-8').digest('hex')}`;
+}
+
+function verifyGithubEvent(event, ssmToken, callback) {
+  let errMsg;
+  let calculatedSig;
+  const headers = event.headers;
+  const sig = headers['X-Hub-Signature'];
+  const githubEvent = headers['X-GitHub-Event'];
+  const id = headers['X-GitHub-Delivery'];
+
+  ssm.getParameter({
+    Name: ssmToken,
+    WithDecryption: true
+  }, function (err, token) {
+    if (err) {
+      return callback(err);
+    }
+
+    calculatedSig = signRequestBody(token.Parameter.Value, event.body);
+
+    if (!sig) {
+      errMsg = '[401] No X-Hub-Signature found on request';
+      return callback(new Error(errMsg));
+    }
+
+    if (!githubEvent) {
+      errMsg = '[422] No X-Github-Event found on request';
+      return callback(new Error(errMsg));
+    }
+
+    if (!id) {
+      errMsg = '[401] No X-Github-Delivery found on request';
+      return callback(new Error(errMsg));
+    }
+
+    if (sig !== calculatedSig) {
+      errMsg = '[401] X-Hub-Signature incorrect. Github webhook token doesn\'t match';
+      return callback(new Error(errMsg));
+    }
+
+    return callback();
   });
 }
 

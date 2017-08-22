@@ -46,6 +46,10 @@ custom:
       Type: String
       Default: ${env:SSM_GITHUB_ACCESS_TOKEN}
       Description: Encrypted SSM parameter name containing the generated Github access token
+    SsmGithubWebhookSecret:
+      Type: String
+      Default: ${env:SSM_GITHUB_WEBHOOK_SECRET}
+      Description: Encrypted SSM parameter name containing the secret that will be used to authenticate Github webhook events
 
 provider:
   name: aws
@@ -66,8 +70,10 @@ provider:
       Resource:
         - "arn:aws:ssm:#{AWS::Region}:#{AWS::AccountId}:parameter${env:SSM_GITHUB_USERNAME}"
         - "arn:aws:ssm:#{AWS::Region}:#{AWS::AccountId}:parameter${env:SSM_GITHUB_ACCESS_TOKEN}"
+        - "arn:aws:ssm:#{AWS::Region}:#{AWS::AccountId}:parameter${env:SSM_GITHUB_WEBHOOK_SECRET}"
         - "arn:aws:ssm:#{AWS::Region}:#{AWS::AccountId}:parameter/${env:SSM_GITHUB_USERNAME}"
         - "arn:aws:ssm:#{AWS::Region}:#{AWS::AccountId}:parameter/${env:SSM_GITHUB_ACCESS_TOKEN}"
+        - "arn:aws:ssm:#{AWS::Region}:#{AWS::AccountId}:parameter/${env:SSM_GITHUB_WEBHOOK_SECRET}"
     - Effect: "Allow"
       Action:
         - kms:Decrypt
@@ -90,6 +96,8 @@ provider:
       Ref: SsmGithubUsername
     SSM_GITHUB_ACCESS_TOKEN:
       Ref: SsmGithubAccessToken
+    SSM_GITHUB_WEBHOOK_SECRET:
+      Ref: SsmGithubWebhookSecret
 
 functions:
   start-build:
@@ -138,6 +146,7 @@ stepFunctions:
         - http:
             path: trigger-build
             method: POST
+            cors: true
       definition:
         Comment: "Check for build status for the given build project, and mark it when done on GH"
         StartAt: start_build
